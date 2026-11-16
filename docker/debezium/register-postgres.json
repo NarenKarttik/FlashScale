@@ -1,0 +1,17 @@
+{
+  "name": "ticketstorm-postgres-cdc",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "flashscale_user",
+    "database.password": "flashscale_pass",
+    "database.dbname": "flashscale_db",
+    "database.server.name": "ticketstorm_cdc",
+    "topic.prefix": "cdc",
+    "plugin.name": "pgoutput",
+    "table.include.list": "public.orders,public.outbox_events",
+    "tombstones.on.delete": "false"
+  }
+}

@@ -1,0 +1,174 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # L7 API Gateway (Reverse Proxy & Edge Traffic Controller)
+  # ============================================================================
+  api-gateway:
+    image: nginx:alpine
+    container_name: ticketstorm-gateway
+    ports:
+      - "80:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - flashscale-app
+
+  # ============================================================================
+  # PostgreSQL 16: Primary Relational Store with Logical Replication (CDC)
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: ticketstorm-postgres
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "max_replication_slots=10"
+    environment:
+      POSTGRES_DB: flashscale_db
+      POSTGRES_USER: flashscale_user
+      POSTGRES_PASSWORD: flashscale_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flashscale_user -d flashscale_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # Redis 7: Ultra-fast In-Memory Tier (Atomic Seat Locks & Sliding Window)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ticketstorm-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ============================================================================
+  # Apache Kafka (KRaft mode - Zookeeperless)
+  # ============================================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: ticketstorm-kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+
+  # ============================================================================
+  # Debezium CDC Connector (Captures Postgres WAL mutations to Kafka)
+  # ============================================================================
+  debezium-connect:
+    image: debezium/connect:2.5
+    container_name: ticketstorm-debezium
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: my_connect_configs
+      OFFSET_STORAGE_TOPIC: my_connect_offsets
+      STATUS_STORAGE_TOPIC: my_connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+    depends_on:
+      - kafka
+      - postgres
+
+  # ============================================================================
+  # MinIO: Local S3-Compatible Cold Storage Data Lake
+  # ============================================================================
+  minio:
+    image: minio/minio:RELEASE.2024-03-05T04-48-44Z
+    container_name: ticketstorm-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadminpassword
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  # ============================================================================
+  # TicketStorm Spring Boot 3 + Java 21 Application
+  # ============================================================================
+  flashscale-app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ticketstorm-app
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/flashscale_db
+      SPRING_DATASOURCE_USERNAME: flashscale_user
+      SPRING_DATASOURCE_PASSWORD: flashscale_pass
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ============================================================================
+  # Observability: Prometheus Metrics Collector
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: ticketstorm-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+  # ============================================================================
+  # Observability: Grafana Dashboard
+  # ============================================================================
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: ticketstorm-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

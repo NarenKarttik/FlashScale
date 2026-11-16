@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: flashscale-service
+  namespace: production
+  labels:
+    app: flashscale
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: flashscale
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flashscale-config
+  namespace: production
+data:
+  SPRING_REDIS_HOST: "redis-cluster.production.svc.cluster.local"
+  SPRING_REDIS_PORT: "6379"
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka-cluster-kafka-bootstrap.production.svc.cluster.local:9092"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: flashscale-secrets
+  namespace: production
+type: Opaque
+stringData:
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres-primary.production.svc.cluster.local:5432/flashscale_db"
+  SPRING_DATASOURCE_USERNAME: "flashscale_user"
+  SPRING_DATASOURCE_PASSWORD: "production_secure_vault_password"
